@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    function getUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    function isStudent(studentId) {
+      return request.auth != null && getUserDoc().role == 'student' && getUserDoc().matric == studentId;
+    }
+    
+    function hasRole(role) {
+      return request.auth != null && getUserDoc().role == role;
+    }
+    
+    function isCentralAdmin() {
+      return hasRole('central_admin');
+    }
+
+    match /users/{userId} {
+      allow read, write: if request.auth != null && (request.auth.uid == userId || isCentralAdmin());
+    }
+
+    match /clearance_pipelines/{studentId} {
+      allow read: if isStudent(studentId) || isCentralAdmin() || 
+                    hasRole('faculty_admin') || hasRole('bursary_admin') || 
+                    hasRole('library_admin') || hasRole('clinic_admin') || hasRole('dsc_admin');
+      
+      // Allowed any update for student so we can auto-advance stages
+      allow update: if isStudent(studentId);
+      
+      allow write: if isCentralAdmin();
+      
+      allow update: if hasRole('faculty_admin') || hasRole('bursary_admin') || 
+                       hasRole('library_admin') || hasRole('clinic_admin') || hasRole('dsc_admin');
+                    
+      allow create: if isCentralAdmin() || isStudent(studentId);
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isStudent(resource.data.studentId);
+      allow update: if isStudent(resource.data.studentId);
+      allow create: if true;
+    }
+  }
+}
