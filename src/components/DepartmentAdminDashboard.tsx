@@ -4,6 +4,8 @@ import { db, auth } from '../firebase';
 import { ClearancePipeline, Stage, REQUIRED_DOCUMENTS } from '../types';
 import { CheckCircle, XCircle, Clock, Search, LogOut } from 'lucide-react';
 
+const STAGES: Stage[] = ['Faculty', 'Bursary', 'Library', 'Clinic', 'DSC'];
+
 interface Props {
   stage: Stage;
 }
@@ -38,15 +40,39 @@ export default function DepartmentAdminDashboard({ stage }: Props) {
     try {
       const docRef = doc(db, 'clearance_pipelines', studentId);
       const stageKey = stage.toLowerCase();
-      await updateDoc(docRef, {
+      const currentStageIndex = STAGES.indexOf(stage);
+      const isLastStage = currentStageIndex === STAGES.length - 1;
+
+      // Build the stage-advancement payload directly on the client.
+      // The server listener has been removed — the approving admin's
+      // client now writes the full transition in one atomic update.
+      const updatePayload: Record<string, any> = {
         [`approvals.${stageKey}`]: true,
-        // The backend server / cloud function will pick this up and advance the stage
-      });
+      };
+
+      if (!isLastStage) {
+        const nextStage = STAGES[currentStageIndex + 1];
+        updatePayload.currentStage = nextStage;
+        updatePayload.stageStatus = 'pending';
+        updatePayload.haltReason = null;
+        updatePayload.resolvingDocumentUrl = null;
+      } else {
+        updatePayload.isFullyCleared = true;
+        updatePayload.stageStatus = 'completed';
+        updatePayload.haltReason = null;
+        updatePayload.resolvingDocumentUrl = null;
+      }
+
+      await updateDoc(docRef, updatePayload);
+
+      const notifMessage = isLastStage
+        ? `Congratulations! Your ${stage} clearance has been approved. You are now fully cleared.`
+        : `Your ${stage} clearance has been approved. You have been advanced to the ${STAGES[currentStageIndex + 1]} stage.`;
 
       await addDoc(collection(db, 'notifications'), {
         studentId,
         title: `${stage} Clearance Approved`,
-        message: `Your clearance for the ${stage} stage has been approved.`,
+        message: notifMessage,
         type: 'status_update',
         read: false,
         createdAt: Date.now()

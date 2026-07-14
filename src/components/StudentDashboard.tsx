@@ -60,41 +60,36 @@ export default function StudentDashboard({ user, matric }: Props) {
     const file = e.target.files?.[0];
     if (!file || !pipeline) return;
 
+    // Security: Only allow uploads for the current stage's required documents
+    const requiredForStage = REQUIRED_DOCUMENTS[pipeline.currentStage] || [];
+    if (!requiredForStage.includes(docName)) {
+      alert('You can only upload documents for your current clearance stage.');
+      return;
+    }
+
     setUploadingDoc(docName);
     try {
-      // Firebase Storage is not natively provisioned in the AI Studio environment,
-      // so we simulate the network upload for the demo applet.
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      const url = `https://mock-storage.example.com/${matric}/${pipeline.currentStage}_${docName.replace(/[^a-zA-Z0-9]/g, '_')}_${file.name}`;
+      const storagePath = `${matric}/${pipeline.currentStage}_${docName.replace(/[^a-zA-Z0-9]/g, '_')}_${file.name}`;
+      const storageRef = ref(storage, storagePath);
+      await uploadBytes(storageRef, file);
+      const url = await getDownloadURL(storageRef);
 
       const docRef = doc(db, 'clearance_pipelines', matric);
-      
+
       const newDocs = { ...(pipeline.uploadedDocuments || {}) };
       newDocs[docName] = url;
 
-      const requiredForStage = REQUIRED_DOCUMENTS[pipeline.currentStage] || [];
       const allUploaded = requiredForStage.every(d => newDocs[d]);
 
-      let updatePayload: any = {
+      const updatePayload: Record<string, any> = {
         uploadedDocuments: newDocs,
+        // Update stage status based on upload state, but DO NOT auto-approve or advance stages
+        // Stage advancement is handled by the server-side listener when admins approve
         stageStatus: allUploaded ? (pipeline.stageStatus === 'halted' ? 'halted_resolved' : 'awaiting_review') : pipeline.stageStatus
       };
 
-      if (allUploaded) {
-        const currentStageIndex = STAGES.indexOf(pipeline.currentStage);
-        const nextStage = STAGES[currentStageIndex + 1];
-        
-        // Auto approve and advance
-        updatePayload[`approvals.${pipeline.currentStage.toLowerCase()}`] = true;
-        
-        if (nextStage) {
-          updatePayload.currentStage = nextStage;
-          updatePayload.stageStatus = 'pending';
-        } else {
-          updatePayload.isFullyCleared = true;
-          updatePayload.stageStatus = 'completed';
-        }
-      }
+      // Students should NEVER be able to set approvals or advance stages themselves
+      // The server-side listener (server.ts) handles auto-advancement when admins approve
 
       await updateDoc(docRef, updatePayload);
     } catch (err) {
@@ -112,6 +107,89 @@ export default function StudentDashboard({ user, matric }: Props) {
   if (!pipeline) {
     return <div className="p-8 text-center text-gray-500">Initializing clearance pipeline...</div>;
   }
+
+  const renderCurrentStageContent = (stage: Stage) => {
+    if (!pipeline) return null;
+
+    if (pipeline.stageStatus === 'halted') {
+      return (
+        <div className="border-l-2 border-red-500 pl-4 py-2 mt-3">
+          <div className="flex items-start gap-3">
+            <div className="flex-1">
+              <p className="text-xs text-red-600 font-bold uppercase tracking-wider">Action Required</p>
+              <p className="text-sm font-medium text-slate-700 mt-1 leading-tight mb-3">{pipeline.haltReason}</p>
+              
+              <p className="text-sm font-medium text-slate-700 mt-3 leading-tight mb-3">Required documents:</p>
+              <div className="space-y-3 mt-4">
+                {REQUIRED_DOCUMENTS[stage].map((docName, i) => (
+                  <div key={i} className="flex items-center justify-between p-3 bg-white border border-red-200 rounded">
+                    <span className="text-xs font-bold text-slate-700">{docName}</span>
+                    {pipeline.uploadedDocuments?.[docName] ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-green-600 flex items-center gap-1"><CheckCircle2 size={14}/> Uploaded</span>
+                        <label className="inline-flex items-center justify-center gap-1 px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 text-[10px] font-bold rounded cursor-pointer transition-colors shadow-sm uppercase tracking-wider">
+                          {uploadingDoc === docName ? "..." : "Replace"}
+                          <input type="file" className="hidden" onChange={(e) => handleFileUpload(e, docName)} disabled={!!uploadingDoc} />
+                        </label>
+                      </div>
+                    ) : (
+                      <label className="inline-flex items-center justify-center gap-2 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded cursor-pointer transition-colors shadow-sm uppercase tracking-wider">
+                        {uploadingDoc === docName ? <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" /> : <><Upload size={12} /> Upload</>}
+                        <input type="file" className="hidden" onChange={(e) => handleFileUpload(e, docName)} disabled={!!uploadingDoc} />
+                      </label>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (pipeline.stageStatus === 'halted_resolved' || pipeline.stageStatus === 'awaiting_review') {
+      return (
+        <p className="text-xs text-blue-700 font-bold bg-blue-50 inline-block px-2.5 py-1 rounded uppercase tracking-wider border border-blue-100">
+          Review Needed
+        </p>
+      );
+    }
+
+    // Default 'pending' or other in-progress statuses
+    return (
+      <div className="border-l-2 border-amber-500 pl-4 py-2 mt-3">
+        <div className="flex items-start gap-3">
+          <div className="flex-1">
+            <p className="text-xs text-amber-700 font-bold bg-amber-50 inline-block px-2.5 py-1 mb-2 rounded uppercase tracking-wider border border-amber-100">
+              In Progress
+            </p>
+            <p className="text-sm font-medium text-slate-700 mt-1 leading-tight mb-3">Please upload the following required documents:</p>
+            <div className="space-y-3 mt-4">
+              {REQUIRED_DOCUMENTS[stage].map((docName, i) => (
+                <div key={i} className="flex items-center justify-between p-3 bg-white border border-amber-200 rounded">
+                  <span className="text-xs font-bold text-slate-700">{docName}</span>
+                  {pipeline.uploadedDocuments?.[docName] ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-green-600 flex items-center gap-1"><CheckCircle2 size={14}/> Uploaded</span>
+                      <label className="inline-flex items-center justify-center gap-1 px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 text-[10px] font-bold rounded cursor-pointer transition-colors shadow-sm uppercase tracking-wider">
+                        {uploadingDoc === docName ? "..." : "Replace"}
+                        <input type="file" className="hidden" onChange={(e) => handleFileUpload(e, docName)} disabled={!!uploadingDoc} />
+                      </label>
+                    </div>
+                  ) : (
+                    <label className="inline-flex items-center justify-center gap-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded cursor-pointer transition-colors shadow-sm uppercase tracking-wider">
+                      {uploadingDoc === docName ? <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" /> : <><Upload size={12} /> Upload</>}
+                      <input type="file" className="hidden" onChange={(e) => handleFileUpload(e, docName)} disabled={!!uploadingDoc} />
+                    </label>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   const currentStageIndex = STAGES.indexOf(pipeline.currentStage);
 
@@ -190,115 +268,7 @@ export default function StudentDashboard({ user, matric }: Props) {
                           </h3>
                           
                           {isCurrent && (
-                            <div className="mt-2">
-                              {pipeline.stageStatus === 'halted' ? (
-                                <div className="border-l-2 border-red-500 pl-4 py-2 mt-3">
-                                  <div className="flex items-start gap-3">
-                                    <div className="flex-1">
-                                      <p className="text-xs text-red-600 font-bold uppercase tracking-wider">Action Required</p>
-                                      <p className="text-sm font-medium text-slate-700 mt-1 leading-tight mb-3">{pipeline.haltReason}</p>
-                                      
-                                      <p className="text-sm font-medium text-slate-700 mt-3 leading-tight mb-3">Required documents:</p>
-                                      <div className="space-y-3 mt-4">
-                                        {REQUIRED_DOCUMENTS[stage].map((docName, i) => {
-                                          const isUploaded = pipeline.uploadedDocuments?.[docName];
-                                          return (
-                                            <div key={i} className="flex items-center justify-between p-3 bg-white border border-red-200 rounded">
-                                              <span className="text-xs font-bold text-slate-700">{docName}</span>
-                                              {isUploaded ? (
-                                                <div className="flex items-center gap-2">
-                                                  <span className="text-xs font-bold text-green-600 flex items-center gap-1"><CheckCircle2 size={14}/> Uploaded</span>
-                                                  <label className="inline-flex items-center justify-center gap-1 px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 text-[10px] font-bold rounded cursor-pointer transition-colors shadow-sm uppercase tracking-wider">
-                                                    {uploadingDoc === docName ? "..." : "Replace"}
-                                                    <input 
-                                                      type="file" 
-                                                      className="hidden" 
-                                                      onChange={(e) => handleFileUpload(e, docName)} 
-                                                      disabled={!!uploadingDoc} 
-                                                    />
-                                                  </label>
-                                                </div>
-                                              ) : (
-                                                <label className="inline-flex items-center justify-center gap-2 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded cursor-pointer transition-colors shadow-sm uppercase tracking-wider">
-                                                  {uploadingDoc === docName ? (
-                                                    <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
-                                                  ) : (
-                                                    <>
-                                                      <Upload size={12} /> Upload
-                                                    </>
-                                                  )}
-                                                  <input 
-                                                    type="file" 
-                                                    className="hidden" 
-                                                    onChange={(e) => handleFileUpload(e, docName)} 
-                                                    disabled={!!uploadingDoc} 
-                                                  />
-                                                </label>
-                                              )}
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    </div>
-                                  </div>
-                                </div>
-                              ) : pipeline.stageStatus === 'halted_resolved' || pipeline.stageStatus === 'awaiting_review' ? (
-                                <p className="text-xs text-blue-700 font-bold bg-blue-50 inline-block px-2.5 py-1 rounded uppercase tracking-wider border border-blue-100">
-                                  Review Needed
-                                </p>
-                              ) : (
-                                <div className="border-l-2 border-amber-500 pl-4 py-2 mt-3">
-                                  <div className="flex items-start gap-3">
-                                    <div className="flex-1">
-                                      <p className="text-xs text-amber-700 font-bold bg-amber-50 inline-block px-2.5 py-1 mb-2 rounded uppercase tracking-wider border border-amber-100">
-                                        In Progress
-                                      </p>
-                                      <p className="text-sm font-medium text-slate-700 mt-1 leading-tight mb-3">Please upload the following required documents:</p>
-                                      <div className="space-y-3 mt-4">
-                                        {REQUIRED_DOCUMENTS[stage].map((docName, i) => {
-                                          const isUploaded = pipeline.uploadedDocuments?.[docName];
-                                          return (
-                                            <div key={i} className="flex items-center justify-between p-3 bg-white border border-amber-200 rounded">
-                                              <span className="text-xs font-bold text-slate-700">{docName}</span>
-                                              {isUploaded ? (
-                                                <div className="flex items-center gap-2">
-                                                  <span className="text-xs font-bold text-green-600 flex items-center gap-1"><CheckCircle2 size={14}/> Uploaded</span>
-                                                  <label className="inline-flex items-center justify-center gap-1 px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 text-[10px] font-bold rounded cursor-pointer transition-colors shadow-sm uppercase tracking-wider">
-                                                    {uploadingDoc === docName ? "..." : "Replace"}
-                                                    <input 
-                                                      type="file" 
-                                                      className="hidden" 
-                                                      onChange={(e) => handleFileUpload(e, docName)} 
-                                                      disabled={!!uploadingDoc} 
-                                                    />
-                                                  </label>
-                                                </div>
-                                              ) : (
-                                                <label className="inline-flex items-center justify-center gap-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded cursor-pointer transition-colors shadow-sm uppercase tracking-wider">
-                                                  {uploadingDoc === docName ? (
-                                                    <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white" />
-                                                  ) : (
-                                                    <>
-                                                      <Upload size={12} /> Upload
-                                                    </>
-                                                  )}
-                                                  <input 
-                                                    type="file" 
-                                                    className="hidden" 
-                                                    onChange={(e) => handleFileUpload(e, docName)} 
-                                                    disabled={!!uploadingDoc} 
-                                                  />
-                                                </label>
-                                              )}
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    </div>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
+                            <div className="mt-2">{renderCurrentStageContent(stage)}</div>
                           )}
                           
                           {isCompleted && (

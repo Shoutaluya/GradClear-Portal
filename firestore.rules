@@ -1,20 +1,39 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
+
     function getUserDoc() {
       return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
     }
+
     function isStudent(studentId) {
       return request.auth != null && getUserDoc().role == 'student' && getUserDoc().matric == studentId;
     }
-    
+
     function hasRole(role) {
       return request.auth != null && getUserDoc().role == role;
     }
-    
+
     function isCentralAdmin() {
       return hasRole('central_admin');
+    }
+
+    function isDepartmentAdmin() {
+      return hasRole('faculty_admin') || hasRole('bursary_admin') ||
+             hasRole('library_admin') || hasRole('clinic_admin') || hasRole('dsc_admin');
+    }
+
+    function getStageForRole(role) {
+      if (role == 'faculty_admin') return 'Faculty';
+      if (role == 'bursary_admin') return 'Bursary';
+      if (role == 'library_admin') return 'Library';
+      if (role == 'clinic_admin') return 'Clinic';
+      if (role == 'dsc_admin') return 'DSC';
+      return null;
+    }
+
+    function isAdminForStage(stage) {
+      return isDepartmentAdmin() && getStageForRole(getUserDoc().role) == stage;
     }
 
     match /users/{userId} {
@@ -22,25 +41,100 @@ service cloud.firestore {
     }
 
     match /clearance_pipelines/{studentId} {
-      allow read: if isStudent(studentId) || isCentralAdmin() || 
-                    hasRole('faculty_admin') || hasRole('bursary_admin') || 
-                    hasRole('library_admin') || hasRole('clinic_admin') || hasRole('dsc_admin');
-      
-      // Allowed any update for student so we can auto-advance stages
-      allow update: if isStudent(studentId);
-      
+      // Students can read their own pipeline, admins can read all
+      allow read: if isStudent(studentId) || isCentralAdmin() || isDepartmentAdmin();
+
+      // Students can ONLY update uploadedDocuments and stageStatus (for halted_resolved/awaiting_review)
+      // They CANNOT modify approvals, currentStage, isFullyCleared, haltReason, resolvingDocumentUrl
+      allow update: if isStudent(studentId) &&
+        // Only allow these specific fields to be updated
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'uploadedDocuments',
+          'stageStatus'
+        ]) &&
+        // stageStatus can only transition to halted_resolved or awaiting_review
+        (!request.resource.data.keys().has('stageStatus') ||
+          (request.resource.data.stageStatus == 'halted_resolved' ||
+           request.resource.data.stageStatus == 'awaiting_review')) &&
+        // uploadedDocuments can only be added/updated for required docs of current stage
+        (!request.resource.data.keys().has('uploadedDocuments') ||
+          isValidDocumentUpload(resource.data, request.resource.data));
+
+      // Central admin can do anything
       allow write: if isCentralAdmin();
-      
-      allow update: if hasRole('faculty_admin') || hasRole('bursary_admin') || 
-                       hasRole('library_admin') || hasRole('clinic_admin') || hasRole('dsc_admin');
-                    
-      allow create: if isCentralAdmin() || isStudent(studentId);
+
+      // Department admin: approve a student and advance their stage.
+      // The client writes the approval boolean + stage-transition fields in one update.
+      allow update: if isDepartmentAdmin() &&
+        isAdminForStage(resource.data.currentStage) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'approvals', 'currentStage', 'stageStatus', 'haltReason',
+          'resolvingDocumentUrl', 'isFullyCleared'
+        ]) &&
+        // Only the correct stage's approval key should change within the approvals map
+        request.resource.data.approvals.diff(resource.data.approvals).affectedKeys().hasOnly([
+          getStageForRole(getUserDoc().role).toLowerCase()
+        ]) &&
+        request.resource.data.approvals[getStageForRole(getUserDoc().role).toLowerCase()] == true;
+
+      // Department admin: halt a student's clearance
+      allow update: if isDepartmentAdmin() &&
+        isAdminForStage(resource.data.currentStage) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'stageStatus', 'haltReason', 'resolvingDocumentUrl'
+        ]) &&
+        request.resource.data.stageStatus == 'halted';
+
+      // Student can create their own pipeline (on first login)
+      allow create: if isStudent(studentId) ||
+        (isCentralAdmin() && request.resource.data.studentId == studentId);
+    }
+
+    // Helper function to validate document uploads
+    function isValidDocumentUpload(oldData, newData) {
+      let oldDocs = oldData.get('uploadedDocuments', {});
+      let newDocs = newData.get('uploadedDocuments', {});
+      let requiredDocs = getRequiredDocuments(oldData.currentStage);
+      // New document keys must be a subset of:
+      //   - keys already uploaded in previous stages (oldDocs.keys()), AND
+      //   - the current stage's required documents (requiredDocs)
+      // This prevents uploading arbitrary files while allowing old-stage
+      // documents to remain in the map after the student advances.
+      return newDocs.keys().hasOnly(oldDocs.keys().concat(requiredDocs));
+    }
+
+    function getRequiredDocuments(stage) {
+      if (stage == 'Faculty') return [
+        'BIO-DATA FORM',
+        'JAMB UTME RESULT SLIP',
+        'O\'LEVEL RESULTS',
+        'JAMB LETTER OF ADMISSION',
+        'AUI NOTIFICATION OF PROVISIONAL ADMISSION',
+        'BIRTH CERTIFICATE/DECLARATION OF AGE',
+        'COURSE REGISTRATION FORM: 100, 200, 300, 400',
+        'SIGNED MATRICULATION OATH FORM'
+      ];
+      if (stage == 'Bursary') return ['BURSARY PAYMENT CLEARANCE'];
+      if (stage == 'Library') return ['LIBRARY CLEARANCE FORM'];
+      if (stage == 'Clinic') return ['CLINIC CLEARANCE FORM'];
+      if (stage == 'DSC') return [
+        'REFERENCE LETTER FROM SEC. SCHOOL',
+        'REFERENCE LETTER FROM PRIEST/PASTOR/IMAM',
+        'ICT STUDENT BIO-DATA PRINTOUT'
+      ];
+      return [];
     }
 
     match /notifications/{notificationId} {
-      allow read: if isStudent(resource.data.studentId);
-      allow update: if isStudent(resource.data.studentId);
-      allow create: if true;
+      // Students can read and mark their own notifications as read
+      allow read: if request.auth != null &&
+        (isStudent(resource.data.studentId) || isCentralAdmin() || isDepartmentAdmin());
+      allow update: if request.auth != null &&
+        isStudent(resource.data.studentId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+
+      // Central admin or department admins can create notifications
+      allow create: if isCentralAdmin() || isDepartmentAdmin();
     }
   }
 }

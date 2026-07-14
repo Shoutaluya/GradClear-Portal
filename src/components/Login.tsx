@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { auth, db } from '../firebase';
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, UserCredential } from 'firebase/auth';
+import { setDoc, doc } from 'firebase/firestore';
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -10,49 +11,42 @@ export default function Login() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
+  const updateUserProfile = async (userCredential: UserCredential) => {
+    const userData: any = { role };
+    if (role === 'student' && matric) {
+      userData.matric = matric;
+    }
+    await setDoc(doc(db, "users", userCredential.user.uid), userData, { merge: true });
+    window.location.reload(); // In a real app, you'd use state management to avoid a reload
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setLoading(true);
+
     try {
-      try {
-        const userCredential = await signInWithEmailAndPassword(auth, email, password);
-        // Update role on successful login for testing purposes
-        const { setDoc, doc } = await import('firebase/firestore');
-        const userData: any = { role };
-        if (role === 'student' && matric) {
-          userData.matric = matric;
-        }
-        await setDoc(doc(db, "users", userCredential.user.uid), userData, { merge: true });
-        
-        window.location.reload();
-      } catch (err: any) {
-        if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
-          try {
-            const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-            // Set role via client SDK directly since security rules allow users to write their own profile
-            const { setDoc, doc } = await import('firebase/firestore');
-            const userData: any = { role };
-            if (role === 'student' && matric) {
-              userData.matric = matric;
-            }
-            await setDoc(doc(db, "users", userCredential.user.uid), userData, { merge: true });
-            
-            // Reload to fetch the new role from Firestore
-            window.location.reload();
-          } catch (createErr: any) {
-            if (createErr.code === 'auth/email-already-in-use') {
-              throw new Error("Incorrect password. Please try again.");
-            }
-            throw createErr;
-          }
-        } else {
-          throw err;
-        }
-      }
+      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      await updateUserProfile(userCredential);
     } catch (err: any) {
-      setError(err.message);
+      if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+        // User doesn't exist, so create a new account
+        handleRegister();
+      } else {
+        setError(err.message);
+        setLoading(false);
+      }
+    }
+  };
+
+  const handleRegister = async () => {
+    try {
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      await updateUserProfile(userCredential);
+    } catch (err: any) {
+      setError(err.code === 'auth/email-already-in-use' ? "An account with this email already exists. If this is you, try logging in." : err.message);
     } finally {
+      // This ensures the loading state is always reset, even if an error occurs.
       setLoading(false);
     }
   };
@@ -79,15 +73,8 @@ export default function Login() {
     
     try {
       const userCredential = await createUserWithEmailAndPassword(auth, demoEmail, demoPassword);
-      // Set role via client SDK
-      const { setDoc, doc } = await import('firebase/firestore');
-      const userData: any = { role };
-      if (role === 'student' && matric) {
-        userData.matric = matric;
-      }
-      await setDoc(doc(db, "users", userCredential.user.uid), userData, { merge: true });
-      
-      window.location.reload();
+      // Role is already set in state, updateUserProfile will use it
+      await updateUserProfile(userCredential);
     } catch (err: any) {
       setError(err.message);
       setLoading(false);
@@ -106,8 +93,9 @@ export default function Login() {
         
         <form onSubmit={handleLogin} className="space-y-5">
           <div>
-            <label className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">Email Address</label>
+            <label htmlFor="email" className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">Email Address</label>
             <input
+              id="email"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -119,10 +107,11 @@ export default function Login() {
 
           <div>
             <div className="flex items-center justify-between mb-1.5">
-              <label className="block text-[10px] font-black text-slate-500 uppercase tracking-wider">Password</label>
+              <label htmlFor="password" className="block text-[10px] font-black text-slate-500 uppercase tracking-wider">Password</label>
               <button type="button" onClick={handleResetPassword} className="text-[10px] font-black text-blue-600 hover:text-blue-800 uppercase tracking-wider">Forgot?</button>
             </div>
             <input
+              id="password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -133,8 +122,9 @@ export default function Login() {
           </div>
           
           <div>
-            <label className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">Test Role</label>
+            <label htmlFor="role" className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">Test Role</label>
             <select
+              id="role"
               value={role}
               onChange={(e) => setRole(e.target.value)}
               className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-none focus:ring-0 focus:border-blue-500 outline-none transition-colors text-sm font-medium text-slate-900"
@@ -151,8 +141,9 @@ export default function Login() {
 
           {role === 'student' && (
             <div>
-              <label className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">Matriculation Number</label>
+              <label htmlFor="matric" className="block text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1.5">Matriculation Number</label>
               <input
+                id="matric"
                 type="text"
                 value={matric}
                 onChange={(e) => setMatric(e.target.value)}
